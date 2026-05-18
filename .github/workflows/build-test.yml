@@ -361,6 +361,12 @@ jobs:
             if [ ! -d "package/mosdns" ]; then
               git clone https://github.com/sbwml/luci-app-mosdns -b v5 package/mosdns
             fi
+            # OpenWrt 24.10 golang feed currently provides Go 1.24.x. Recent v2dat
+            # patches in luci-app-mosdns raise go.mod to 1.25.0, which makes the
+            # package fail before compilation starts.
+            if [ -d "package/mosdns/v2dat/patches" ]; then
+              grep -RIl 'go 1\.25\.0' package/mosdns/v2dat/patches | xargs -r sed -i 's/go 1\.25\.0/go 1.24/g'
+            fi
             if [ ! -d "package/v2ray-geodata" ]; then
               git clone https://github.com/sbwml/v2ray-geodata package/v2ray-geodata
             fi
