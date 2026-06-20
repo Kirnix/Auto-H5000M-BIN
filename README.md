@@ -64,6 +64,26 @@ $env:ENABLE_QMODEM_NEXT = 'false'
 .\scripts\local-build.ps1
 ```
 
+全兼容插件本地编译示例（互斥项中选择 QModem Next，不同时启用旧 QModem/原版 Modem）：
+
+```powershell
+$env:ENABLE_ADGUARDHOME = 'true'
+$env:ENABLE_OPENCLASH = 'true'
+$env:ENABLE_NIKKI = 'true'
+$env:ENABLE_UPNP = 'true'
+$env:ENABLE_VLMCSD = 'true'
+$env:ENABLE_MOSDNS = 'true'
+$env:ENABLE_DOCKERMAN = 'true'
+$env:ENABLE_QMODEM_NEXT = 'true'
+$env:ENABLE_QMODEM = 'false'
+$env:ENABLE_MWAN = 'true'
+$env:ENABLE_HOMEPROXY = 'true'
+$env:ENABLE_ADBYBY_PLUS = 'true'
+$env:ENABLE_ORIGINAL_MODEM = 'false'
+$env:ENABLE_EASYMESH = 'true'
+.\scripts\local-build.ps1
+```
+
 国内网络可按需覆盖下载镜像：
 
 ```powershell
@@ -88,7 +108,7 @@ PROFILE_SET=full bash scripts/coverage-test.sh
 FULL_BUILD_PROFILE=proxy-stack PROFILE_SET=quick bash scripts/coverage-test.sh
 ```
 
-`quick` 覆盖默认构建和代理栈组合；`full` 会额外覆盖最小系统、HomeProxy-only、MosDNS-only、Nikki-only、旧 QModem、原版 modem、常用可选服务和 DockerMan。`FULL_BUILD_PROFILE` 会在配置覆盖后额外完整编译一个指定 profile，用作固件级冒烟测试。
+`quick` 覆盖默认构建和代理栈组合；`full` 会额外覆盖最小系统、HomeProxy-only、MosDNS-only、Nikki-only、旧 QModem、原版 modem、常用可选服务、全兼容插件和 DockerMan。`FULL_BUILD_PROFILE` 会在配置覆盖后额外完整编译一个指定 profile，用作固件级冒烟测试。
 
 成功后产物在 `artifacts/`，并打包成 `artifacts.tar.gz`。
 
@@ -120,6 +140,7 @@ FULL_BUILD_PROFILE=proxy-stack PROFILE_SET=quick bash scripts/coverage-test.sh
 | `ENABLE_HOMEPROXY` | `false` | HomeProxy |
 | `ENABLE_ADBYBY_PLUS` | `false` | Adbyby Plus Lite |
 | `ENABLE_ORIGINAL_MODEM` | `false` | 上游原版 modem（与 QModem 互斥） |
+| `ENABLE_EASYMESH` | `true` | EasyMesh / 802.11s mesh 支持 |
 
 ### 下载优化变量
 
@@ -160,6 +181,8 @@ FULL_BUILD_PROFILE=proxy-stack PROFILE_SET=quick bash scripts/coverage-test.sh
 插件源码修复：启用 Nikki 时会在 feed 更新失败/缺失后补拉 `nikkinikki-org/OpenWrt-nikki`，并校验 `nikki` / `mihomo-meta`；启用 OpenClash 时补拉 `vernesong/OpenClash` 内的 `luci-app-openclash`；启用 MosDNS 时补拉 `sbwml/luci-app-mosdns` 与 `sbwml/v2ray-geodata`，清理 feeds 内同名旧包，并校验 `mosdns` / `v2dat` / `v2ray-geoip` / `v2ray-geosite`；启用 HomeProxy 时补拉 `immortalwrt/homeproxy`，失败后回退到 `VIKINGYFY/homeproxy`，并强制校验 `luci-app-homeproxy` / `sing-box` / `kmod-nft-tproxy` 是否进入最终 `.config`。
 
 UPnP 修复：`luci-app-upnp` 依赖虚拟包 `miniupnpd`，fw4 构建中显式选择 `miniupnpd-nftables` 与 `rpcd-mod-ucode`，避免 `defconfig` 将 `luci-app-upnp` 自动关闭。若上游源码引用 `libcrypt-compat` 但当前 feeds 未定义该包，构建脚本会补一个 glibc 条件下的兼容包定义，避免包扫描阶段刷屏 warning。
+
+EasyMesh / mesh 支持：当前上游分支没有独立的 `luci-app-easymesh` 包；MTK EasyMesh/MAP 能力以内置 WiFi 驱动源码和 MT7992 `map_*.dat` profile 形式存在。`ENABLE_EASYMESH=true` 时脚本会启用 `mesh11sd` 与 `wpad-mesh-openssl`，替换基础 `wpad` 变体以保留 mesh 能力，并校验 MTK `feature/map` 源文件和 MT7992 MAP profile 是否仍在上游源码中。
 
 ---
 

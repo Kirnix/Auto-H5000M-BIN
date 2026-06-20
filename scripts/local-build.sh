@@ -8,6 +8,14 @@ CONFIG_URL="${CONFIG_URL:-https://raw.githubusercontent.com/padavanonly/immortal
 SOURCE_DIR="${SOURCE_DIR:-immortalwrt}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-artifacts}"
 THREADS="${THREADS:-$(nproc 2>/dev/null || echo 2)}"
+HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-300}"
+GIT_TIMEOUT="${GIT_TIMEOUT:-1800}"
+FEEDS_TIMEOUT="${FEEDS_TIMEOUT:-3600}"
+CONFIG_TIMEOUT="${CONFIG_TIMEOUT:-1800}"
+DOWNLOAD_TIMEOUT="${DOWNLOAD_TIMEOUT:-7200}"
+TOOLCHAIN_TIMEOUT="${TOOLCHAIN_TIMEOUT:-7200}"
+COMPILE_TIMEOUT="${COMPILE_TIMEOUT:-28800}"
+V2DAT_TIMEOUT="${V2DAT_TIMEOUT:-3600}"
 GOPROXY="${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct}"
 GOSUMDB="${GOSUMDB:-sum.golang.google.cn}"
 DOWNLOAD_MIRROR="${DOWNLOAD_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/openwrt/sources;https://mirrors.ustc.edu.cn/openwrt/sources;https://mirrors.bfsu.edu.cn/openwrt/sources}"
@@ -34,6 +42,7 @@ ENABLE_MWAN="${ENABLE_MWAN:-true}"
 ENABLE_HOMEPROXY="${ENABLE_HOMEPROXY:-false}"
 ENABLE_ADBYBY_PLUS="${ENABLE_ADBYBY_PLUS:-false}"
 ENABLE_ORIGINAL_MODEM="${ENABLE_ORIGINAL_MODEM:-false}"
+ENABLE_EASYMESH="${ENABLE_EASYMESH:-true}"
 
 INSTALL_DEPS=false
 PREPARE_ONLY=false
@@ -99,6 +108,51 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
 }
 
+run_with_timeout() {
+  local seconds="$1"
+  local label="$2"
+  shift 2
+  local cmd=("$@")
+  local start pid status elapsed
+
+  log "$label (timeout ${seconds}s)"
+  start="$(date +%s)"
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --foreground "$seconds" "${cmd[@]}" &
+  else
+    "${cmd[@]}" &
+  fi
+  pid="$!"
+
+  while kill -0 "$pid" 2>/dev/null; do
+    local waited=0
+    while [ "$waited" -lt "$HEARTBEAT_INTERVAL" ] && kill -0 "$pid" 2>/dev/null; do
+      sleep 5
+      waited=$((waited + 5))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      elapsed=$(($(date +%s) - start))
+      echo "[$(date '+%H:%M:%S')] Still running: $label (${elapsed}s elapsed)"
+    fi
+  done
+
+  set +e
+  wait "$pid"
+  status="$?"
+  set -e
+
+  elapsed=$(($(date +%s) - start))
+  if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+    die "$label timed out after ${elapsed}s"
+  fi
+  if [ "$status" -ne 0 ]; then
+    echo "$label failed after ${elapsed}s with exit code ${status}" >&2
+    return "$status"
+  fi
+  echo "$label completed in ${elapsed}s"
+}
+
 github_url_candidates() {
   local url="$1"
   printf '%s\n' "$url"
@@ -127,7 +181,7 @@ git_clone_retry() {
   while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue
     log "Cloning $(basename "$url") from $candidate"
-    if git clone "${args[@]}" "$candidate" "$dest"; then
+    if run_with_timeout "$GIT_TIMEOUT" "git clone $(basename "$url")" git clone "${args[@]}" "$candidate" "$dest"; then
       return 0
     fi
     rm -rf "$dest"
@@ -170,6 +224,10 @@ check_environment() {
     require_cmd "$cmd"
   done
 
+  if [ "$(id -u)" -eq 0 ]; then
+    export FORCE_UNSAFE_CONFIGURE="${FORCE_UNSAFE_CONFIGURE:-1}"
+  fi
+
   if [ "$(uname -s)" != "Linux" ]; then
     die "OpenWrt builds require Linux. Run this script in WSL2 or a Linux host."
   fi
@@ -198,6 +256,7 @@ MWAN=${ENABLE_MWAN}
 HomeProxy=${ENABLE_HOMEPROXY}
 Adbyby Plus=${ENABLE_ADBYBY_PLUS}
 Original Modem=${ENABLE_ORIGINAL_MODEM}
+EasyMesh=${ENABLE_EASYMESH}
 GOPROXY=${GOPROXY}
 GOSUMDB=${GOSUMDB}
 DOWNLOAD_MIRROR=${DOWNLOAD_MIRROR}
@@ -220,7 +279,7 @@ prepare_source() {
       rm -rf "$SOURCE_DIR"
       git_clone_retry "$REPO_URL" "$REPO_BRANCH" "$SOURCE_DIR" 1
     else
-      if git fetch origin "$REPO_BRANCH"; then
+      if run_with_timeout "$GIT_TIMEOUT" "git fetch source" git fetch origin "$REPO_BRANCH"; then
         git reset --hard FETCH_HEAD
         git clean -fd
       else
@@ -249,10 +308,12 @@ prepare_feeds() {
   ! is_true "$ENABLE_NIKKI" && rm -rf feeds/nikki* package/feeds/nikki 2>/dev/null || true
   ! is_true "$ENABLE_QMODEM_NEXT" && ! is_true "$ENABLE_QMODEM" && rm -rf feeds/qmodem* package/feeds/qmodem 2>/dev/null || true
 
+  ensure_libcrypt_compat_package
+
   if is_true "$SKIP_FEEDS_UPDATE"; then
     log "Skipping ./scripts/feeds update -a (per --skip-feeds-update)"
   else
-    ./scripts/feeds update -a || die "feeds update failed; refusing to continue with incomplete feeds"
+    run_with_timeout "$FEEDS_TIMEOUT" "feeds update" ./scripts/feeds update -a || die "feeds update failed; refusing to continue with incomplete feeds"
   fi
   if is_true "$ENABLE_MOSDNS" || is_true "$ENABLE_NIKKI"; then
     install_golang_feed
@@ -261,7 +322,7 @@ prepare_feeds() {
     mkdir -p feeds
     git_clone_retry "https://github.com/nikkinikki-org/OpenWrt-nikki.git" "main" "feeds/nikki" 1 || die "Unable to fetch Nikki feed"
   fi
-  ./scripts/feeds install -a -f || log "WARNING: feeds install -a reported errors; selected packages will be installed explicitly"
+  run_with_timeout "$FEEDS_TIMEOUT" "feeds install all" ./scripts/feeds install -a -f || log "WARNING: feeds install -a reported errors; selected packages will be installed explicitly"
 }
 
 fix_qmi_driver() {
@@ -285,16 +346,95 @@ patch_v2dat_go124() {
   if [ -n "$patch_files" ]; then
     printf '%s\n' "$patch_files" | xargs sed -i \
       -e 's/go 1\.25\.0/go 1.24.0/g' \
-      -e 's/^+go 1\.24$/+go 1.24.0\n+\n+toolchain go1.24.13/g' \
-      -e 's/^+go 1\.24\.0$/+go 1.24.0\n+\n+toolchain go1.24.13/g' \
       -e 's/^@@ -1,8 +1,9 @@$/@@ -1,8 +1,11 @@/g' \
       -e 's/^@@ -12,4 +13,5 @@ require ($/@@ -12,4 +15,5 @@ require (/g' \
       -e 's|golang.org/x/sys v0\.42\.0 // indirect|golang.org/x/sys v0.37.0 // indirect|g' \
       -e 's|golang.org/x/sys v0\.42\.0 h1:omrd2nAlyT5ESRdCLYdm3+fMfNFE/+Rf4bDIQImRJeo=|golang.org/x/sys v0.37.0 h1:fdNQudmxPjkdUTPnLn5mdQv7Zwvbvpaxqs831goi9kQ=|g' \
       -e 's|golang.org/x/sys v0\.42\.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=|golang.org/x/sys v0.37.0/go.mod h1:OgkHotnGiDImocRcuBABYBEXf8A9a87e/uXjp9XT3ks=|g'
+    printf '%s\n' "$patch_files" | while IFS= read -r patch_file; do
+      perl -0pi -e 's/^\+go 1\.24(?:\.0)?\n(?:\+\n\+toolchain go1\.24\.13\n)+/+go 1.24.0\n+\n+toolchain go1.24.13\n/m' "$patch_file"
+      perl -0pi -e 's/(h1:[^\n ]+=) (github\.com\/google\/go-cmp)/$1\n+$2/g' "$patch_file"
+      perl -0pi -e 's/(h1:[^\n ]+=) (google\.golang\.org\/protobuf)/$1\n+$2/g' "$patch_file"
+    done
   fi
   rm -f "$patch_dir/999-fix-go-version-for-go124.patch"
   rm -rf build_dir/target-*/v2dat-* 2>/dev/null || true
+}
+
+patch_mosdns_go124() {
+  patch_v2dat_go124
+
+  local patch_dir="package/mosdns/mosdns/patches"
+  [ -d "$patch_dir" ] || return 0
+  rm -f "$patch_dir/999-fix-go-version-for-go124.patch"
+
+  local mosdns_makefile="package/mosdns/mosdns/Makefile"
+  if [ -f "$mosdns_makefile" ]; then
+    sed -i '/^GO_MOD_ARGS[[:space:]]*[:+?]*=/d' "$mosdns_makefile"
+    sed -i '/golang-package.mk/a GO_MOD_ARGS:= -mod=mod -modcacherw' "$mosdns_makefile"
+  fi
+  if [ -f "$mosdns_makefile" ]; then
+    local tmp_makefile
+    tmp_makefile="$(mktemp)"
+    awk '
+      /^define Build\/Prepare$/ {
+        collecting=1
+        block=$0 ORS
+        next
+      }
+      collecting {
+        block=block $0 ORS
+        if ($0 == "endef") {
+          if (block !~ /MosDNS Go 1\.24 dependency compatibility/) {
+            printf "%s", block
+          }
+          collecting=0
+          block=""
+        }
+        next
+      }
+      { print }
+      END {
+        if (collecting && block !~ /MosDNS Go 1\.24 dependency compatibility/) {
+          printf "%s", block
+        }
+      }
+    ' "$mosdns_makefile" > "$tmp_makefile"
+    mv "$tmp_makefile" "$mosdns_makefile"
+
+    tmp_makefile="$(mktemp)"
+    awk '
+      /^\$\(eval \$\(call GoBinPackage,mosdns\)\)/ && !inserted {
+        print "define Build/Prepare"
+        print "\t$(call Build/Prepare/Default)"
+        print "\t# MosDNS Go 1.24 dependency compatibility"
+        print "\tsed -i \047s|go 1\\.25\\.0|go 1.24.0|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|github.com/go-chi/chi/v5 v5.2.5|github.com/go-chi/chi/v5 v5.2.3|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|github.com/go-viper/mapstructure/v2 v2.5.0|github.com/go-viper/mapstructure/v2 v2.4.0|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|github.com/klauspost/compress v1.18.4|github.com/klauspost/compress v1.18.2|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|github.com/miekg/dns v1.1.72|github.com/miekg/dns v1.1.70|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|github.com/quic-go/quic-go v0.59.0|github.com/quic-go/quic-go v0.58.1|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|golang.org/x/exp v0.0.0-20260312153236-7ab1446f8b90|golang.org/x/exp v0.0.0-20251219203646-944ab1f22d93|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|golang.org/x/net v0.52.0|golang.org/x/net v0.48.0|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|golang.org/x/sync v0.20.0|golang.org/x/sync v0.19.0|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|golang.org/x/sys v0.42.0|golang.org/x/sys v0.40.0|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|golang.org/x/time v0.15.0|golang.org/x/time v0.14.0|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|github.com/mdlayher/netlink v1.9.0|github.com/mdlayher/netlink v1.8.0|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|github.com/prometheus/procfs v0.20.1|github.com/prometheus/procfs v0.19.2|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|go.yaml.in/yaml/v2 v2.4.4|go.yaml.in/yaml/v2 v2.4.3|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|golang.org/x/crypto v0.49.0|golang.org/x/crypto v0.46.0|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|golang.org/x/mod v0.34.0|golang.org/x/mod v0.32.0|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|golang.org/x/text v0.35.0|golang.org/x/text v0.33.0|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "\tsed -i \047s|golang.org/x/tools v0.43.0|golang.org/x/tools v0.40.0|g\047 $(PKG_BUILD_DIR)/go.mod"
+        print "endef"
+        print ""
+        inserted=1
+      }
+      { print }
+    ' "$mosdns_makefile" > "$tmp_makefile"
+    mv "$tmp_makefile" "$mosdns_makefile"
+  fi
+  rm -rf build_dir/target-*/mosdns-* 2>/dev/null || true
 }
 
 patch_mtwifi_apcli_bssid_budget() {
@@ -422,7 +562,6 @@ apply_package_fixes() {
 
   patch_mtwifi_apcli_bssid_budget
   verify_mtwifi_patch
-  ensure_libcrypt_compat_package
 
   local ebtables_makefile="package/network/utils/ebtables/Makefile"
   if [ -f "$ebtables_makefile" ] && grep -qE 'git(://|s://git\.)netfilter\.org/ebtables' "$ebtables_makefile"; then
@@ -483,7 +622,7 @@ apply_package_fixes() {
       package/feeds/packages/v2ray-geoip \
       package/feeds/packages/v2ray-geosite 2>/dev/null || true
     [ ! -d "package/mosdns" ] && git_clone_retry https://github.com/sbwml/luci-app-mosdns v5 package/mosdns 1
-    patch_v2dat_go124
+    patch_mosdns_go124
     [ ! -d "package/v2ray-geodata" ] && git_clone_retry https://github.com/sbwml/v2ray-geodata "" package/v2ray-geodata 1
     local geodata_makefile="package/v2ray-geodata/Makefile"
     if [ -f "$geodata_makefile" ]; then
@@ -500,11 +639,15 @@ apply_package_fixes() {
     [ -f "package/luci-app-homeproxy/Makefile" ] || die "luci-app-homeproxy repository layout changed"
   fi
 
+  if is_true "$ENABLE_EASYMESH"; then
+    require_package_file "EasyMesh mesh11sd" "package/feeds/routing/mesh11sd/Makefile"
+  fi
+
   rm -rf package/feeds/packages/{exim,onionshare-cli,python-zope-event,python-zope-interface,python-gevent,python-twisted} 2>/dev/null || true
 
   if is_true "$ENABLE_VLMCSD"; then
-    ./scripts/feeds install -f vlmcsd || true
-    ./scripts/feeds install -f luci-app-vlmcsd || true
+    run_with_timeout "$FEEDS_TIMEOUT" "feeds install vlmcsd" ./scripts/feeds install -f vlmcsd || true
+    run_with_timeout "$FEEDS_TIMEOUT" "feeds install luci-app-vlmcsd" ./scripts/feeds install -f luci-app-vlmcsd || true
   fi
 
   if is_true "$ENABLE_NIKKI"; then
@@ -524,7 +667,7 @@ apply_package_fixes() {
 
 feed_install_pkg() {
   local pkg="$1"
-  ./scripts/feeds install -f "$pkg" || die "Unable to install feed package: $pkg"
+  run_with_timeout "$FEEDS_TIMEOUT" "feeds install $pkg" ./scripts/feeds install -f "$pkg" || die "Unable to install feed package: $pkg"
 }
 
 require_package_file() {
@@ -564,6 +707,11 @@ install_selected_packages() {
     require_package_file "HomeProxy sing-box" "package/feeds/packages/sing-box/Makefile"
   fi
 
+  if is_true "$ENABLE_EASYMESH"; then
+    feed_install_pkg mesh11sd
+    feed_install_pkg wpad-mesh-openssl
+  fi
+
   if is_true "$ENABLE_MOSDNS"; then
     require_package_file "MosDNS LuCI" "package/mosdns/luci-app-mosdns/Makefile"
     require_package_file "MosDNS core" "package/mosdns/mosdns/Makefile"
@@ -588,6 +736,87 @@ config_disable() {
     sed -i "/^CONFIG_${symbol}=/d; /^# CONFIG_${symbol} is not set/d" .config
     echo "# CONFIG_${symbol} is not set" >> .config
   }
+}
+
+enable_upnp_stack_config() {
+  config_enable PACKAGE_luci-app-upnp
+  config_enable PACKAGE_miniupnpd-nftables
+  config_enable PACKAGE_rpcd-mod-ucode
+  config_enable PACKAGE_libcap-ng
+  config_enable PACKAGE_libmnl
+  config_enable PACKAGE_libuuid
+  config_enable PACKAGE_libnftnl
+}
+
+enable_easymesh_stack_config() {
+  config_disable PACKAGE_wpad-basic-mbedtls
+  config_disable PACKAGE_wpad-basic-openssl
+  config_disable PACKAGE_wpad-basic-wolfssl
+  config_disable PACKAGE_wpad-mbedtls
+  config_disable PACKAGE_wpad-openssl
+  config_disable PACKAGE_wpad-wolfssl
+  config_disable PACKAGE_wpad-mesh-mbedtls
+  config_disable PACKAGE_wpad-mesh-wolfssl
+  config_enable PACKAGE_wpad-mesh-openssl
+  config_enable PACKAGE_mesh11sd
+  config_enable PACKAGE_kmod-cfg80211
+  config_enable PACKAGE_kmod-mac80211
+  config_enable PACKAGE_luci-app-mtwifi-cfg
+  config_enable PACKAGE_mtwifi-cfg
+}
+
+verify_mtk_easymesh_assets() {
+  is_true "$ENABLE_EASYMESH" || return 0
+
+  local missing=0
+  local path
+  for path in \
+    package/mtk/drivers/mt_hwifi/src/mt_wifi/feature/map/map.c \
+    package/mtk/drivers/mt_hwifi/src/mt_wifi/profiles/mt7992/map_mt7992.dbdc.b0.dat \
+    package/mtk/drivers/mt_hwifi/src/mt_wifi/profiles/mt7992/map_mt7992.dbdc.b1.dat \
+    package/mtk/drivers/mt_wifi7/src/mt_wifi/feature/map/map.c \
+    package/mtk/drivers/mt_wifi7/src/mt_wifi/profiles/mt7992/map_mt7992.dbdc.b0.dat \
+    package/mtk/drivers/mt_wifi7/src/mt_wifi/profiles/mt7992/map_mt7992.dbdc.b1.dat; do
+    if [ ! -f "$path" ]; then
+      echo "EasyMesh/MTK MAP asset missing: $path" >&2
+      missing=1
+    fi
+  done
+
+  [ "$missing" -eq 0 ] || die "EasyMesh requested but MTK MT7992 MAP assets are incomplete"
+}
+
+diagnose_upnp_config() {
+  log "Diagnosing UPnP package state"
+  for pkg_file in \
+    package/feeds/luci/luci-app-upnp/Makefile \
+    package/feeds/packages/miniupnpd/Makefile \
+    feeds/luci/applications/luci-app-upnp/Makefile \
+    feeds/packages/net/miniupnpd/Makefile; do
+    if [ -f "$pkg_file" ]; then
+      echo "--- $pkg_file"
+      grep -nE 'LUCI_DEPENDS|DEPENDS|PROVIDES|VARIANT|DEFAULT_VARIANT|CONFLICTS' "$pkg_file" || true
+    fi
+  done
+  grep -nE 'PACKAGE_(luci-app-upnp|miniupnpd|miniupnpd-nftables|miniupnpd-iptables|rpcd-mod-ucode|libcap-ng|libmnl|libuuid|libnftnl)' .config || true
+}
+
+retry_upnp_config_if_needed() {
+  is_true "$ENABLE_UPNP" || return 0
+
+  if grep -q '^CONFIG_PACKAGE_luci-app-upnp=y$' .config && grep -q '^CONFIG_PACKAGE_miniupnpd-nftables=y$' .config; then
+    return 0
+  fi
+
+  diagnose_upnp_config
+  log "Retrying UPnP package selection with explicit nftables stack"
+  feed_install_pkg miniupnpd-nftables
+  feed_install_pkg luci-app-upnp
+  rm -rf tmp/.config* tmp/.packageinfo tmp/info/.packageinfo* 2>/dev/null || true
+  config_disable PACKAGE_miniupnpd-iptables
+  enable_upnp_stack_config
+  run_with_timeout "$CONFIG_TIMEOUT" "make defconfig after UPnP retry" make defconfig
+  diagnose_upnp_config
 }
 
 configure_build() {
@@ -634,11 +863,25 @@ EOF
 
   is_true "$ENABLE_ADGUARDHOME" && { echo "CONFIG_PACKAGE_luci-app-adguardhome=y" >> .config; echo "CONFIG_PACKAGE_luci-i18n-adguardhome-zh-cn=y" >> .config; } || disabled_pkgs+=("luci-app-adguardhome" "luci-i18n-adguardhome-zh-cn")
   is_true "$ENABLE_OPENCLASH" && echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config || disabled_pkgs+=("luci-app-openclash")
+  if is_true "$ENABLE_EASYMESH"; then
+    cat >> .config <<'EOF'
+CONFIG_PACKAGE_mesh11sd=y
+CONFIG_PACKAGE_wpad-mesh-openssl=y
+CONFIG_PACKAGE_luci-app-mtwifi-cfg=y
+CONFIG_PACKAGE_mtwifi-cfg=y
+EOF
+  else
+    disabled_pkgs+=("mesh11sd" "wpad-mesh-openssl")
+  fi
   if is_true "$ENABLE_UPNP"; then
     cat >> .config <<'EOF'
 CONFIG_PACKAGE_luci-app-upnp=y
 CONFIG_PACKAGE_miniupnpd-nftables=y
 CONFIG_PACKAGE_rpcd-mod-ucode=y
+CONFIG_PACKAGE_libcap-ng=y
+CONFIG_PACKAGE_libmnl=y
+CONFIG_PACKAGE_libuuid=y
+CONFIG_PACKAGE_libnftnl=y
 EOF
   else
     disabled_pkgs+=("luci-app-upnp" "miniupnpd-nftables" "miniupnpd-iptables")
@@ -673,9 +916,10 @@ EOF
   fi
 
   if is_true "$ENABLE_UPNP"; then
-    config_enable PACKAGE_luci-app-upnp
-    config_enable PACKAGE_miniupnpd-nftables
-    config_enable PACKAGE_rpcd-mod-ucode
+    enable_upnp_stack_config
+  fi
+  if is_true "$ENABLE_EASYMESH"; then
+    enable_easymesh_stack_config
   fi
   is_true "$ENABLE_ADBYBY_PLUS" && { echo "CONFIG_PACKAGE_luci-app-adbyby-plus=y" >> .config; echo "CONFIG_PACKAGE_luci-i18n-adbyby-plus-zh-cn=y" >> .config; echo "CONFIG_PACKAGE_ipset=y" >> .config; } || disabled_pkgs+=("luci-app-adbyby-plus" "luci-i18n-adbyby-plus-zh-cn")
 
@@ -754,6 +998,15 @@ EOF
     config_enable PACKAGE_v2ray-geosite
   fi
 
+  if is_true "$ENABLE_UPNP"; then
+    config_disable PACKAGE_miniupnpd-iptables
+    enable_upnp_stack_config
+  fi
+
+  if is_true "$ENABLE_EASYMESH"; then
+    enable_easymesh_stack_config
+  fi
+
   if is_true "$ENABLE_HOMEPROXY"; then
     config_enable PACKAGE_luci-app-homeproxy
     config_enable PACKAGE_sing-box
@@ -768,14 +1021,15 @@ EOF
     config_enable PACKAGE_luci-app-vlmcsd
   fi
 
-  make defconfig
+  run_with_timeout "$CONFIG_TIMEOUT" "make defconfig" make defconfig
+  retry_upnp_config_if_needed
 
   if is_true "$ENABLE_VLMCSD" && ! grep -q '^CONFIG_PACKAGE_luci-app-vlmcsd=y$' .config; then
-    ./scripts/feeds install -f vlmcsd || true
-    ./scripts/feeds install -f luci-app-vlmcsd || true
+    run_with_timeout "$FEEDS_TIMEOUT" "feeds install vlmcsd after VLMCSd retry" ./scripts/feeds install -f vlmcsd || true
+    run_with_timeout "$FEEDS_TIMEOUT" "feeds install luci-app-vlmcsd after VLMCSd retry" ./scripts/feeds install -f luci-app-vlmcsd || true
     config_enable PACKAGE_vlmcsd
     config_enable PACKAGE_luci-app-vlmcsd
-    make defconfig
+    run_with_timeout "$CONFIG_TIMEOUT" "make defconfig after VLMCSd retry" make defconfig
   fi
 
   verify_enabled_pkg "Nikki" "luci-app-nikki" "$ENABLE_NIKKI"
@@ -797,6 +1051,9 @@ EOF
   verify_enabled_pkg "HomeProxy sing-box" "sing-box" "$ENABLE_HOMEPROXY"
   verify_enabled_pkg "HomeProxy nft tproxy" "kmod-nft-tproxy" "$ENABLE_HOMEPROXY"
   verify_enabled_pkg "Adbyby Plus" "luci-app-adbyby-plus" "$ENABLE_ADBYBY_PLUS"
+  verify_enabled_pkg "EasyMesh mesh daemon" "mesh11sd" "$ENABLE_EASYMESH"
+  verify_enabled_pkg "EasyMesh wpad mesh" "wpad-mesh-openssl" "$ENABLE_EASYMESH"
+  verify_mtk_easymesh_assets
 }
 
 verify_enabled_pkg() {
@@ -816,7 +1073,7 @@ prefetch_and_toolchain() {
     log "Downloading package sources"
     find dl -size -1024c -delete 2>/dev/null || true
     for attempt in 1 2 3; do
-      make download -j"$THREADS" && break
+      run_with_timeout "$DOWNLOAD_TIMEOUT" "make download attempt $attempt" make download -j"$THREADS" && break
       find dl -size -1024c -delete 2>/dev/null || true
       [ "$attempt" -eq 3 ] && echo "WARNING: make download did not complete cleanly"
     done
@@ -834,7 +1091,7 @@ prefetch_and_toolchain() {
     else
       log "Toolchain cache is missing runtime linker files; forcing toolchain rebuild"
       rm -rf staging_dir/toolchain-* build_dir/toolchain-* 2>/dev/null || true
-      make toolchain/install -j"$THREADS"
+      run_with_timeout "$TOOLCHAIN_TIMEOUT" "make toolchain/install" make toolchain/install -j"$THREADS"
     fi
   fi
 }
@@ -860,8 +1117,8 @@ precompile_v2dat() {
   [ -d "package/mosdns/v2dat" ] || return 0
   log "Precompiling MosDNS v2dat with a clean Go module cache"
   clean_v2dat_go_mod_cache
-  make package/mosdns/v2dat/clean V=s || true
-  make package/mosdns/v2dat/compile V=s
+  run_with_timeout "$V2DAT_TIMEOUT" "clean MosDNS v2dat" make package/mosdns/v2dat/clean V=s || true
+  run_with_timeout "$V2DAT_TIMEOUT" "compile MosDNS v2dat" make package/mosdns/v2dat/compile V=s
 }
 
 compile_firmware() {
@@ -876,7 +1133,7 @@ compile_firmware() {
 
   local start_time end_time duration
   start_time="$(date +%s)"
-  if make -j"$THREADS" IGNORE_ERRORS=n; then
+  if run_with_timeout "$COMPILE_TIMEOUT" "make firmware" make -j"$THREADS" IGNORE_ERRORS=n; then
     end_time="$(date +%s)"
     duration=$((end_time - start_time))
     echo "Build succeeded in ${duration}s"
@@ -885,13 +1142,13 @@ compile_firmware() {
     if is_true "$ENABLE_MOSDNS"; then
       grep -RIn 'go 1\.' package/mosdns/v2dat/patches || true
       clean_v2dat_go_mod_cache
-      make package/mosdns/v2dat/clean V=s || true
-      if ! make package/mosdns/v2dat/compile V=s; then
+      run_with_timeout "$V2DAT_TIMEOUT" "clean MosDNS v2dat diagnostics" make package/mosdns/v2dat/clean V=s || true
+      if ! run_with_timeout "$V2DAT_TIMEOUT" "compile MosDNS v2dat diagnostics" make package/mosdns/v2dat/compile V=s; then
         find build_dir -path '*v2dat*/go.mod' -exec sh -c 'echo "--- $1"; sed -n "1,40p" "$1"' _ {} \; || true
         die "MosDNS v2dat failed to compile"
       fi
     fi
-    make -j1 V=s
+    run_with_timeout "$COMPILE_TIMEOUT" "make firmware single-thread diagnostics" make -j1 V=s
   fi
 }
 

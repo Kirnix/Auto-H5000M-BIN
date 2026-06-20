@@ -70,6 +70,11 @@ on:
         required: false
         default: false
         type: boolean
+      enable_easymesh:
+        description: '启用 EasyMesh / 802.11s Mesh 支持'
+        required: false
+        default: true
+        type: boolean
       publish_release:
         description: '上传 Release（默认 true）'
         required: false
@@ -143,6 +148,7 @@ jobs:
             [enable_homeproxy]=false
             [enable_adbyby_plus]=false
             [enable_original_modem]=false
+            [enable_easymesh]=true
             [publish_release]=true
             [run_config_coverage]=false
             [coverage_profile_set]=quick
@@ -163,6 +169,7 @@ jobs:
             [enable_homeproxy]='${{ github.event.inputs.enable_homeproxy }}'
             [enable_adbyby_plus]='${{ github.event.inputs.enable_adbyby_plus }}'
             [enable_original_modem]='${{ github.event.inputs.enable_original_modem }}'
+            [enable_easymesh]='${{ github.event.inputs.enable_easymesh }}'
             [publish_release]='${{ github.event.inputs.publish_release }}'
             [run_config_coverage]='${{ github.event.inputs.run_config_coverage }}'
             [coverage_profile_set]='${{ github.event.inputs.coverage_profile_set }}'
@@ -264,6 +271,7 @@ jobs:
           ENABLE_HOMEPROXY: ${{ steps.features.outputs.enable_homeproxy }}
           ENABLE_ADBYBY_PLUS: ${{ steps.features.outputs.enable_adbyby_plus }}
           ENABLE_ORIGINAL_MODEM: ${{ steps.features.outputs.enable_original_modem }}
+          ENABLE_EASYMESH: ${{ steps.features.outputs.enable_easymesh }}
         run: |
           set -euo pipefail
           export PATH="/usr/lib/ccache:$PATH"
@@ -317,6 +325,7 @@ jobs:
             - HomeProxy:   ${{ steps.features.outputs.enable_homeproxy }}
             - Adbyby Plus: ${{ steps.features.outputs.enable_adbyby_plus }}
             - 原版 Modem:  ${{ steps.features.outputs.enable_original_modem }}
+            - EasyMesh:    ${{ steps.features.outputs.enable_easymesh }}
           prerelease: true
           files: artifacts/*
         env:

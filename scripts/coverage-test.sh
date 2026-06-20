@@ -49,6 +49,7 @@ base_env=(
   ENABLE_HOMEPROXY=false
   ENABLE_ADBYBY_PLUS=false
   ENABLE_ORIGINAL_MODEM=false
+  ENABLE_EASYMESH=true
 )
 
 run_static_checks() {
@@ -125,6 +126,13 @@ run_named_profile() {
         ENABLE_ADGUARDHOME=true ENABLE_OPENCLASH=true ENABLE_ADBYBY_PLUS=true \
         ENABLE_UPNP=true ENABLE_VLMCSD=true ENABLE_MWAN=true ENABLE_QMODEM_NEXT=false
       ;;
+    all-compatible)
+      run_profile all-compatible "$mode" \
+        ENABLE_ADGUARDHOME=true ENABLE_OPENCLASH=true ENABLE_NIKKI=true ENABLE_UPNP=true \
+        ENABLE_VLMCSD=true ENABLE_MOSDNS=true ENABLE_DOCKERMAN=true ENABLE_QMODEM_NEXT=true \
+        ENABLE_QMODEM=false ENABLE_MWAN=true ENABLE_HOMEPROXY=true ENABLE_ADBYBY_PLUS=true \
+        ENABLE_ORIGINAL_MODEM=false ENABLE_EASYMESH=true
+      ;;
     dockerman)
       run_profile dockerman "$mode" \
         ENABLE_NIKKI=false ENABLE_MOSDNS=false ENABLE_DOCKERMAN=true ENABLE_QMODEM_NEXT=false
@@ -142,7 +150,7 @@ profiles_for_set() {
       printf '%s\n' default proxy-stack
       ;;
     full)
-      printf '%s\n' default minimal proxy-stack homeproxy-only mosdns-only nikki-only qmodem-legacy original-modem optional-services dockerman
+      printf '%s\n' default minimal proxy-stack homeproxy-only mosdns-only nikki-only qmodem-legacy original-modem optional-services all-compatible dockerman
       ;;
     *)
       echo "Unknown PROFILE_SET: $PROFILE_SET" >&2
