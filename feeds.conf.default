@@ -13,3 +13,6 @@ src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main
 # RU - Zapret - Netshift
 src-git zapret https://github.com/remittor/zapret-openwrt.git;zap1
 src-git netshift https://github.com/yandexru45/netshift.git
+
+# Modem Web UI
+src-git modemwebui https://github.com/lonelysix-editor/luci-app-modemwebui.git
