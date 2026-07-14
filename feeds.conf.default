@@ -10,6 +10,6 @@ src-git telephony https://github.com/openwrt/telephony.git;openwrt-24.10
 src-git qmodem https://github.com/FUjr/QModem.git;main
 src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main
 
-RU - Zapret - Netshift
+# RU - Zapret - Netshift
 src-git zapret https://github.com/remittor/zapret-openwrt.git;zap1
 src-git netshift https://github.com/yandexru45/netshift.git
